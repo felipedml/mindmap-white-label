@@ -11,17 +11,6 @@ const Excalidraw = dynamic(
   { ssr: false }
 );
 
-function palette(depth: number) {
-  const p = [
-    { bg: "#DBEAFE", stroke: "#1D4ED8" },
-    { bg: "#E0E7FF", stroke: "#4338CA" },
-    { bg: "#D1FAE5", stroke: "#047857" },
-    { bg: "#FEF3C7", stroke: "#B45309" },
-    { bg: "#FCE7F3", stroke: "#BE185D" },
-  ];
-  return p[Math.min(depth, p.length - 1)];
-}
-
 function estimateDx(xs: number[]) {
   const unique = Array.from(new Set(xs)).sort((a, b) => a - b);
   let best = 0;
@@ -32,67 +21,19 @@ function estimateDx(xs: number[]) {
   return best || 320;
 }
 
-function styleElements(elements: any[]) {
-  const rects = elements.filter((e) => e?.type === "rectangle");
-  if (!rects.length) return elements;
+function computeDepthByRectId(elements: any[]) {
+  const rects = elements.filter((e) => e?.type === "rectangle" && e?.id && e?.id !== "panel_refs");
+  if (!rects.length) return new Map<string, number>();
 
   const minX = Math.min(...rects.map((r: any) => r.x));
   const dx = estimateDx(rects.map((r: any) => r.x));
 
-  const depthByRectId = new Map<string, number>();
+  const depthBy = new Map<string, number>();
   for (const r of rects) {
     const depth = Math.max(0, Math.round((r.x - minX) / dx));
-    depthByRectId.set(r.id, depth);
+    depthBy.set(r.id, depth);
   }
-
-  return elements.map((el: any) => {
-    if (el?.type === "rectangle") {
-      const depth = depthByRectId.get(el.id) ?? 0;
-      const c = palette(depth);
-
-      return {
-        ...el,
-        roughness: 0,
-        strokeWidth: 2,
-        strokeStyle: "solid",
-        fillStyle: "solid",
-        opacity: 100,
-        roundness: el.roundness ?? { type: 3 },
-        strokeColor: c.stroke,
-        backgroundColor: c.bg,
-      };
-    }
-
-    if (el?.type === "text") {
-      const depth = depthByRectId.get(el.containerId) ?? 0;
-      const fontSize = depth === 0 ? 24 : depth === 1 ? 20 : 18;
-
-      return {
-        ...el,
-        fontFamily: 2,
-        fontSize,
-        textAlign: "center",
-        verticalAlign: "middle",
-      };
-    }
-
-    if (el?.type === "arrow") {
-      const startId = el.startBinding?.elementId;
-      const depth = startId ? (depthByRectId.get(startId) ?? 0) : 0;
-      const c = palette(depth);
-
-      return {
-        ...el,
-        roughness: 0,
-        strokeWidth: 2,
-        strokeStyle: "solid",
-        opacity: 100,
-        strokeColor: c.stroke,
-      };
-    }
-
-    return el;
-  });
+  return depthBy;
 }
 
 export default function EditorPage({ params }: { params: { id: string } }) {
@@ -101,23 +42,27 @@ export default function EditorPage({ params }: { params: { id: string } }) {
   const token = search.get("t") || "";
 
   const [initialData, setInitialData] = useState<any>(null);
+  const [collapsed, setCollapsed] = useState(false);
+
+  const apiRef = useRef<any>(null);
 
   const saving = useRef(false);
   const pending = useRef<{ elements: any; appState: any } | null>(null);
+  const suppressSave = useRef(false);
+
+  const fullElementsRef = useRef<any[] | null>(null);
 
   useEffect(() => {
     fetch(`/api/diagrams/${id}`)
       .then((r) => r.json())
       .then((data) => {
         const maybeSkeleton = data.elements || [];
-        const converted = convertToExcalidrawElements(maybeSkeleton, {
-          regenerateIds: false,
-        });
+        const converted = convertToExcalidrawElements(maybeSkeleton, { regenerateIds: false }) as any[];
 
-        const styled = styleElements(converted as any[]);
+        fullElementsRef.current = converted;
 
         setInitialData({
-          elements: styled,
+          elements: converted,
           appState: {
             ...(data.appState || {}),
             zenModeEnabled: false,
@@ -153,7 +98,6 @@ export default function EditorPage({ params }: { params: { id: string } }) {
         } finally {
           setTimeout(() => {
             saving.current = false;
-
             if (pending.current) {
               const p = pending.current;
               pending.current = null;
@@ -167,9 +111,63 @@ export default function EditorPage({ params }: { params: { id: string } }) {
 
   const onChange = useMemo(() => {
     return (elements: readonly any[], appState: any, _files: any): void => {
+      if (suppressSave.current) {
+        suppressSave.current = false;
+        return;
+      }
+      // guarda versão completa para “Expandir tudo”
+      if (!collapsed) {
+        fullElementsRef.current = elements as any[];
+      }
       saveNow(elements, appState);
     };
-  }, [saveNow]);
+  }, [saveNow, collapsed]);
+
+  function applyCollapsedMode() {
+    if (!apiRef.current) return;
+    const current = apiRef.current.getSceneElements?.() || [];
+    const depthBy = computeDepthByRectId(current);
+
+    // esconde retângulos/textos/arrows de profundidade >= 2
+    const hidden = current.map((el: any) => {
+      if (el?.id === "panel_refs") return el;
+
+      if (el?.type === "rectangle") {
+        const d = depthBy.get(el.id) ?? 0;
+        if (d >= 2) return { ...el, isDeleted: true };
+      }
+
+      if (el?.type === "text") {
+        const containerId = el.containerId;
+        const d = depthBy.get(containerId) ?? 0;
+        if (d >= 2) return { ...el, isDeleted: true };
+      }
+
+      if (el?.type === "arrow") {
+        const s = el.startBinding?.elementId;
+        const e = el.endBinding?.elementId;
+        const ds = s ? (depthBy.get(s) ?? 0) : 0;
+        const de = e ? (depthBy.get(e) ?? 0) : 0;
+        if (ds >= 2 || de >= 2) return { ...el, isDeleted: true };
+      }
+
+      return el;
+    });
+
+    suppressSave.current = true;
+    apiRef.current.updateScene?.({ elements: hidden });
+    setCollapsed(true);
+  }
+
+  function restoreAll() {
+    if (!apiRef.current) return;
+    const full = fullElementsRef.current;
+    if (!full) return;
+
+    suppressSave.current = true;
+    apiRef.current.updateScene?.({ elements: full });
+    setCollapsed(false);
+  }
 
   if (!token) {
     return (
@@ -185,8 +183,44 @@ export default function EditorPage({ params }: { params: { id: string } }) {
   if (!initialData) return <div style={{ padding: 16 }}>Carregando…</div>;
 
   return (
-    <div style={{ height: "100vh" }}>
-      <Excalidraw initialData={initialData} onChange={onChange} />
+    <div style={{ height: "100vh", position: "relative" }}>
+      <div
+        style={{
+          position: "absolute",
+          top: 12,
+          left: 12,
+          zIndex: 10,
+          display: "flex",
+          gap: 8,
+          padding: 8,
+          borderRadius: 12,
+          background: "rgba(255,255,255,0.92)",
+          border: "1px solid #E2E8F0",
+        }}
+      >
+        <button
+          onClick={applyCollapsedMode}
+          disabled={collapsed}
+          style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #CBD5E1", cursor: "pointer" }}
+        >
+          Colapsar detalhes
+        </button>
+        <button
+          onClick={restoreAll}
+          disabled={!collapsed}
+          style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #CBD5E1", cursor: "pointer" }}
+        >
+          Expandir tudo
+        </button>
+      </div>
+
+      <Excalidraw
+        initialData={initialData}
+        onChange={onChange}
+        excalidrawAPI={(api: any) => {
+          apiRef.current = api;
+        }}
+      />
     </div>
   );
 }
