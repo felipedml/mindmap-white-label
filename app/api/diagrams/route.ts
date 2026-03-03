@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { nanoid } from "nanoid";
-import { saveDiagram } from "@/lib/storage";
-import { outlineToSkeletonElements } from "@/lib/mindmap";
+import { saveDiagram } from "../../../lib/storage";
+import { outlineToSkeletonElements } from "../../../lib/mindmap";
 
 function assertPickaxeAuth(req: Request) {
   const key = req.headers.get("x-pickaxe-secret");
