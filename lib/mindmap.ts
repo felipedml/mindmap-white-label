@@ -6,7 +6,7 @@ function parseOutline(outline: string): TreeNode {
     .map((l) => l.replace(/\t/g, "  "))
     .filter((l) => l.trim().length > 0);
 
-  const rootText = (lines[0] || "Tema").replace(/^-+\s*/, "").trim();
+  const rootText = (lines[0] || "Tema").replace(/^-+\s*/, "").trim() || "Tema";
   const root: TreeNode = { text: rootText, children: [] };
 
   const stack: { indent: number; node: TreeNode }[] = [{ indent: 0, node: root }];
@@ -30,18 +30,6 @@ function parseOutline(outline: string): TreeNode {
   return root;
 }
 
-function isRightPanelLabel(label: string) {
-  const t = (label || "").toLowerCase();
-  return (
-    t.includes("refer") ||
-    t.includes("fonte") ||
-    t.includes("bibliograf") ||
-    t.includes("evid") ||
-    t.includes("dados") ||
-    t.includes("leituras")
-  );
-}
-
 function styleForDepth(depth: number) {
   const palette = [
     { bg: "#DBEAFE", stroke: "#1D4ED8" }, // azul
@@ -54,9 +42,27 @@ function styleForDepth(depth: number) {
 }
 
 function dimsForDepth(depth: number) {
-  if (depth === 0) return { w: 400, h: 140, fontSize: 24 };
-  if (depth === 1) return { w: 330, h: 108, fontSize: 20 };
+  if (depth === 0) return { w: 420, h: 150, fontSize: 24 };
+  if (depth === 1) return { w: 340, h: 112, fontSize: 20 };
   return { w: 310, h: 96, fontSize: 18 };
+}
+
+function countLeaves(root: TreeNode) {
+  const leaves = new Map<TreeNode, number>();
+
+  function dfs(n: TreeNode): number {
+    if (!n.children.length) {
+      leaves.set(n, 1);
+      return 1;
+    }
+    let sum = 0;
+    for (const ch of n.children) sum += dfs(ch);
+    leaves.set(n, Math.max(1, sum));
+    return Math.max(1, sum);
+  }
+
+  dfs(root);
+  return leaves;
 }
 
 function collectNodes(root: TreeNode) {
@@ -73,54 +79,94 @@ function collectNodes(root: TreeNode) {
   return nodes;
 }
 
-function layoutClassic(root: TreeNode) {
-  // Layout L->R para a árvore (sem painel de referências)
-  let leafY = 0;
-  const dx = 380;
-  const dy = 150;
+function radialLayout(root: TreeNode) {
+  // Parâmetros de “elegância”
+  const baseR = 260;     // raio do 1º nível
+  const stepR = 260;     // incremento por profundidade
+  const margin = 160;    // margem superior/esquerda
 
-  const positions = new Map<TreeNode, { x: number; y: number; depth: number }>();
+  const leaves = countLeaves(root);
+  const angles = new Map<TreeNode, { start: number; end: number; mid: number }>();
+  const centers = new Map<TreeNode, { cx: number; cy: number; depth: number }>();
 
-  function dfs(node: TreeNode, depth: number): number {
-    if (node.children.length === 0) {
-      const y = leafY * dy;
-      leafY += 1;
-      positions.set(node, { x: depth * dx, y, depth });
-      return y;
+  // Root ocupa 360°
+  const startA = -Math.PI;
+  const endA = Math.PI;
+
+  function assignAngles(n: TreeNode, a0: number, a1: number) {
+    const mid = (a0 + a1) / 2;
+    angles.set(n, { start: a0, end: a1, mid });
+
+    if (!n.children.length) return;
+
+    const total = n.children.reduce((acc, ch) => acc + (leaves.get(ch) ?? 1), 0) || 1;
+    let cur = a0;
+
+    for (const ch of n.children) {
+      const w = (leaves.get(ch) ?? 1) / total;
+      const span = (a1 - a0) * w;
+
+      // pequena folga angular para evitar “amontoar”
+      const pad = Math.min(0.06, span * 0.12);
+      const c0 = cur + pad;
+      const c1 = cur + span - pad;
+
+      assignAngles(ch, c0, c1);
+      cur += span;
     }
-    const childYs = node.children.map((ch) => dfs(ch, depth + 1));
-    const y = Math.round(childYs.reduce((a, b) => a + b, 0) / childYs.length);
-    positions.set(node, { x: depth * dx, y, depth });
-    return y;
   }
 
-  dfs(root, 0);
+  assignAngles(root, startA, endA);
 
-  // centralizar em Y e dar margem superior
-  const ys = Array.from(positions.values()).map((p) => p.y);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const midY = (minY + maxY) / 2;
+  // Posiciona nós em coordenadas polares (raio por profundidade)
+  const rootCx = 700;
+  const rootCy = 520;
 
-  const topMargin = 140;
-  const shiftY = -midY + topMargin;
+  function place(n: TreeNode, depth: number) {
+    if (n === root) {
+      centers.set(n, { cx: rootCx, cy: rootCy, depth });
+    } else {
+      const a = angles.get(n)?.mid ?? 0;
+      const r = baseR + (depth - 1) * stepR;
+      const cx = rootCx + r * Math.cos(a);
+      const cy = rootCy + r * Math.sin(a);
+      centers.set(n, { cx, cy, depth });
+    }
 
-  for (const [node, p] of positions.entries()) {
-    positions.set(node, { ...p, y: p.y + shiftY });
+    for (const ch of n.children) place(ch, depth + 1);
   }
 
-  return positions;
+  place(root, 0);
+
+  // Normaliza para evitar coordenadas negativas (shift por minX/minY)
+  const rects = Array.from(centers.entries()).map(([node, p]) => {
+    const { w, h } = dimsForDepth(p.depth);
+    return { x: p.cx - w / 2, y: p.cy - h / 2, w, h };
+  });
+
+  const minX = Math.min(...rects.map((r) => r.x));
+  const minY = Math.min(...rects.map((r) => r.y));
+
+  const shiftX = margin - minX;
+  const shiftY = margin - minY;
+
+  for (const [node, p] of centers.entries()) {
+    centers.set(node, { ...p, cx: p.cx + shiftX, cy: p.cy + shiftY });
+  }
+
+  return centers;
 }
 
 export function blankSkeletonElements(title: string) {
   const t = (title || "Tema").trim() || "Tema";
   const colors = styleForDepth(0);
+
   return [
     {
       id: "node_0",
       type: "rectangle",
-      x: 120,
-      y: 140,
+      x: 220,
+      y: 200,
       width: 420,
       height: 150,
       roughness: 0,
@@ -144,121 +190,43 @@ export function blankSkeletonElements(title: string) {
 
 export function outlineToSkeletonElements(outline: string) {
   const tree = parseOutline(outline);
-
-  // Se existir um ramo “Referências e dados” (ou similar), ele vira “painel” à direita
-  let rightBranch: TreeNode | null = null;
-  const idx = tree.children.findIndex((c) => isRightPanelLabel(c.text));
-  if (idx >= 0) {
-    rightBranch = tree.children[idx];
-    tree.children.splice(idx, 1);
-  }
-
-  const pos = layoutClassic(tree);
   const nodes = collectNodes(tree);
+  const centers = radialLayout(tree);
 
-  // Se houver painel, posiciona manualmente o ramo e seus filhos à direita
-  const rightNodes: { node: TreeNode; id: string; depth: number; parent?: string }[] = [];
-  const rightIdByNode = new Map<TreeNode, string>();
-
-  if (rightBranch) {
-    // cria ids para o ramo de referência
-    let c = nodes.length;
-    function walkRight(n: TreeNode, depth: number, parent?: string) {
-      const id = `node_${c++}`;
-      rightNodes.push({ node: n, id, depth, parent });
-      rightIdByNode.set(n, id);
-      for (const ch of n.children) walkRight(ch, depth + 1, id);
-    }
-    walkRight(rightBranch, 1, nodes[0].id); // pai = root
-
-    // pos fixo do painel
-    const rightX = 980;
-    const colDx = 360;
-    const startY = 120;
-
-    // header do painel
-    pos.set(rightBranch, { x: rightX, y: startY + 60, depth: 1 });
-
-    // filhos como lista vertical
-    let y = startY + 210;
-    for (const ch of rightBranch.children) {
-      pos.set(ch, { x: rightX + colDx, y, depth: 2 });
-      y += 140;
-
-      // netos em cascata abaixo do filho
-      let yy = y - 90;
-      for (const g of ch.children) {
-        pos.set(g, { x: rightX + colDx * 2, y: yy, depth: 3 });
-        yy += 120;
-        y = Math.max(y, yy + 20);
-      }
-    }
-
-    // painel (fundo) como retângulo suave
-    const panelH = Math.max(520, y - startY + 80);
-    const panel = {
-      id: "panel_refs",
-      type: "rectangle",
-      x: rightX - 90,
-      y: startY,
-      width: 980,
-      height: panelH,
-      roughness: 0,
-      strokeWidth: 1,
-      strokeStyle: "solid",
-      fillStyle: "solid",
-      opacity: 100,
-      roundness: { type: 3 },
-      strokeColor: "#CBD5E1",
-      backgroundColor: "#F8FAFC",
-      label: {
-        text: "Notas e referências",
-        fontSize: 20,
-        fontFamily: 2,
-        textAlign: "left",
-        verticalAlign: "top",
-      },
-    };
-
-    // O painel precisa ser o primeiro para ficar “atrás”
-    // Vamos inserir depois no array final como primeiro elemento.
-    // Guardamos ele numa variável externa via closure no final.
-    (outlineToSkeletonElements as any)._panel = panel;
-  } else {
-    (outlineToSkeletonElements as any)._panel = null;
-  }
-
-  // Junta listas
-  const all = rightNodes.length ? nodes.concat(rightNodes) : nodes;
+  const nodeById = new Map<string, { node: TreeNode; depth: number; parent?: string }>();
   const idByNode = new Map<TreeNode, string>();
-  for (const n of all) idByNode.set(n.node, n.id);
+
+  for (const n of nodes) {
+    nodeById.set(n.id, { node: n.node, depth: n.depth, parent: n.parent });
+    idByNode.set(n.node, n.id);
+  }
 
   const elements: any[] = [];
-  const panel = (outlineToSkeletonElements as any)._panel;
-  if (panel) elements.push(panel);
 
   // Nós
-  for (const { node, id } of all) {
-    const p = pos.get(node) || { x: 0, y: 0, depth: 0 };
-    const depth = p.depth ?? 0;
+  for (const { node, id, depth } of nodes) {
+    const c = centers.get(node) || { cx: 200, cy: 200, depth };
     const { w, h, fontSize } = dimsForDepth(depth);
     const colors = styleForDepth(depth);
 
     elements.push({
       id,
       type: "rectangle",
-      x: p.x,
-      y: p.y - h / 2,
+      x: c.cx - w / 2,
+      y: c.cy - h / 2,
       width: w,
       height: h,
+
       roughness: 0,
       strokeWidth: 2,
       strokeStyle: "solid",
       fillStyle: "solid",
       opacity: 100,
       roundness: { type: 3 },
+
       strokeColor: colors.stroke,
       backgroundColor: colors.bg,
+
       label: {
         text: node.text,
         fontSize,
@@ -269,28 +237,23 @@ export function outlineToSkeletonElements(outline: string) {
     });
   }
 
-  // Setas (não ligar setas no “painel” ao painel-fundo; apenas entre nós)
-  // Arrow skeleton: start/end por id
-  for (const { node, id, parent } of all) {
+  // Setas
+  for (const { id, parent, depth } of nodes) {
     if (!parent) continue;
-    // não cria seta para o painel-fundo
-    if (id === "panel_refs" || parent === "panel_refs") continue;
 
-    const from = parent;
-    const to = id;
+    const colors = styleForDepth(Math.max(0, depth - 1));
 
-    // posição aproximada
     elements.push({
       type: "arrow",
       x: 0,
       y: 0,
-      start: { id: from },
-      end: { id: to },
+      start: { id: parent },
+      end: { id },
       roughness: 0,
       strokeWidth: 2,
       strokeStyle: "solid",
       opacity: 100,
-      strokeColor: "#334155",
+      strokeColor: colors.stroke,
     });
   }
 
