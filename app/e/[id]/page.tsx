@@ -17,7 +17,9 @@ export default function EditorPage({ params }: { params: { id: string } }) {
   const token = search.get("t") || "";
 
   const [initialData, setInitialData] = useState<any>(null);
+
   const saving = useRef(false);
+  const pending = useRef<{ elements: any; appState: any } | null>(null);
 
   useEffect(() => {
     fetch(`/api/diagrams/${id}`)
@@ -39,30 +41,61 @@ export default function EditorPage({ params }: { params: { id: string } }) {
       });
   }, [id]);
 
-  const onChange = useMemo(
-    () => async (elements: any[], appState: any) => {
+  // Salva sem retornar Promise (o Excalidraw exige callback "void")
+  const saveNow = useMemo(() => {
+    return (elements: any, appState: any) => {
       if (!token) return;
-      if (saving.current) return;
+
+      // se já estiver salvando, guarda a última alteração para salvar em seguida
+      if (saving.current) {
+        pending.current = { elements, appState };
+        return;
+      }
+
       saving.current = true;
 
-      try {
-        await fetch(`/api/diagrams/${id}?t=${encodeURIComponent(token)}`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ elements, appState }),
-        });
-      } finally {
-        setTimeout(() => (saving.current = false), 1200);
-      }
-    },
-    [id, token]
-  );
+      void (async () => {
+        try {
+          await fetch(`/api/diagrams/${id}?t=${encodeURIComponent(token)}`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ elements, appState }),
+          });
+        } finally {
+          // pequena pausa para evitar salvar a cada milissegundo
+          setTimeout(() => {
+            saving.current = false;
+
+            // se houver alteração pendente, salva a mais recente
+            if (pending.current) {
+              const p = pending.current;
+              pending.current = null;
+              saveNow(p.elements, p.appState);
+            }
+          }, 900);
+        }
+      })();
+    };
+  }, [id, token]);
+
+  // Assinatura compatível: (elements, appState, files) => void
+  const onChange = useMemo(() => {
+    return (
+      elements: readonly any[],
+      appState: any,
+      _files: any
+    ): void => {
+      saveNow(elements, appState);
+    };
+  }, [saveNow]);
 
   if (!token) {
     return (
       <div style={{ padding: 16 }}>
         <h2>Link inválido</h2>
-        <p>Faltou o token <code>?t=</code> na URL.</p>
+        <p>
+          Faltou o token <code>?t=</code> na URL.
+        </p>
       </div>
     );
   }
