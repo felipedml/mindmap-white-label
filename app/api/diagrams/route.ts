@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 import { saveDiagram } from "../../../lib/storage";
-import { outlineToSkeletonElements } from "../../../lib/mindmap";
+import { outlineToSkeletonElements, blankSkeletonElements } from "../../../lib/mindmap";
 
 function assertPickaxeAuth(req: Request) {
   const key = req.headers.get("x-pickaxe-secret");
@@ -14,23 +14,31 @@ export async function POST(req: Request) {
   }
 
   const body = await req.json().catch(() => ({}));
-  const title = String(body.title || "Mapa mental");
-  const outline = String(body.outline || "").trim();
 
-  if (!outline) {
-    return NextResponse.json({ error: "outline_required" }, { status: 400 });
-  }
+  const title = String(body.title || "Mapa mental").trim() || "Mapa mental";
+  const outline = String(body.outline || "").trim();
+  const mode = String(body.mode || "outline").toLowerCase(); // "outline" | "blank"
 
   const id = nanoid(10);
   const writeToken = nanoid(24);
-  const skeleton = outlineToSkeletonElements(outline);
+
+  let elements: any[] = [];
+
+  if (mode === "blank") {
+    elements = blankSkeletonElements(title);
+  } else {
+    if (!outline) {
+      return NextResponse.json({ error: "outline_required" }, { status: 400 });
+    }
+    elements = outlineToSkeletonElements(outline);
+  }
 
   await saveDiagram({
     id,
     title,
     createdAt: new Date().toISOString(),
     writeToken,
-    elements: skeleton,
+    elements,
     appState: { zoom: { value: 1 } },
   });
 
