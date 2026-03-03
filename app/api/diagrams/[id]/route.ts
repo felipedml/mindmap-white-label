@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDiagram, saveDiagram } from "@/lib/storage";
+import { getDiagram, saveDiagram } from "../../../../lib/storage";
 
 export async function GET(_: Request, { params }: { params: { id: string } }) {
   const diagram = await getDiagram(params.id);
